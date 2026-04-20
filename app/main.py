@@ -93,6 +93,7 @@ async def get_code(short_code: str, session: SessionDep):
         return RedirectResponse(url.original_url, status_code=302)
 
 
+# Just for testing purposes
 @app.delete("/urls", status_code=204)
 async def delete_all_codes(session: SessionDep):
     session.query(Code).delete()
