@@ -1,0 +1,74 @@
+name: run-urlshortener
+on: [push]
+jobs:
+  flake8-lint:
+    runs-on: ubuntu-latest
+    name: Lint
+    steps:
+      - name: Check out source repository
+        uses: actions/checkout@v4
+      - name: Set up Python environment
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: flake8 Lint
+        uses: py-actions/flake8@v2
+        with:
+          path: "app tests"
+
+  test:
+    runs-on: ubuntu-latest
+    name: Test
+    needs: flake8-lint
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: urlshortener
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+    steps:
+      - name: Check out source repository
+        uses: actions/checkout@v4
+      - name: Set up Python environment
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Create .env file
+        run: echo "DATABASE_URL=postgresql://postgres:postgres@localhost:5432/urlshortener" > .env
+      - name: Run tests
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@localhost:5432/urlshortener
+        run: pytest tests/
+
+  docker:
+    runs-on: ubuntu-latest
+    name: Docker
+    needs: test
+    steps:
+      - name: Check out source repository
+        uses: actions/checkout@v4
+      - name: Build and start containers
+        run: docker compose up -d --build
+      - name: Wait for app to be healthy
+        run: |
+          for i in {1..15}; do
+            curl -sf http://localhost:8000/health && echo "App is up" && exit 0
+            echo "Waiting... ($i/15)"
+            sleep 2
+          done
+          echo "App failed to become healthy" && exit 1
+      - name: Check both containers are running
+        run: docker compose ps | grep -E "running|healthy"
+      - name: Tear down
+        if: always()
+        run: docker compose down -v

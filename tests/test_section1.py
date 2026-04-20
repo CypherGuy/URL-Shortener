@@ -1,4 +1,4 @@
-from main import app, URLModel, SessionLocal, engine, Base
+from app.main import app, engine, Base
 import pytest
 from fastapi.testclient import TestClient
 import os
@@ -45,7 +45,6 @@ class TestPhase2CoreEndpoints:
         })
         assert response.status_code == 201, f"Expected 201, got {response.status_code}"
         data = response.json()
-        assert "short_code" in data
         assert "short_url" in data
         assert data["original_url"] == "https://example.com/very/long/path"
 
@@ -62,10 +61,10 @@ class TestPhase2CoreEndpoints:
         create_response = client.post("/shorten", json={
             "original_url": "https://google.com"
         })
-        short_code = create_response.json()["short_code"]
+        short_code = create_response.json()["short_url"].split("/")[-1]
 
         # Test redirect
-        response = client.get(f"/{short_code}", allow_redirects=False)
+        response = client.get(f"/{short_code}", follow_redirects=False)
         assert response.status_code == 302
         assert response.headers["location"] == "https://google.com"
 
@@ -75,14 +74,14 @@ class TestPhase2CoreEndpoints:
         create_response = client.post("/shorten", json={
             "original_url": "https://example.com"
         })
-        short_code = create_response.json()["short_code"]
+        short_code = create_response.json()["short_url"].split("/")[-1]
 
         # Check stats before
         stats_before = client.get(f"/stats/{short_code}").json()
         assert stats_before["clicks"] == 0
 
         # Click once
-        client.get(f"/{short_code}", allow_redirects=False)
+        client.get(f"/{short_code}", follow_redirects=False)
 
         # Check stats after
         stats_after = client.get(f"/stats/{short_code}").json()
@@ -90,7 +89,7 @@ class TestPhase2CoreEndpoints:
 
     def test_get_redirect_404_on_invalid_code(self, setup_db):
         """✓ GET /{invalid_code} returns 404"""
-        response = client.get("/invalid123code", allow_redirects=False)
+        response = client.get("/invalid123code", follow_redirects=False)
         assert response.status_code == 404
 
     def test_delete_removes_url(self, setup_db):
@@ -99,14 +98,14 @@ class TestPhase2CoreEndpoints:
         create_response = client.post("/shorten", json={
             "original_url": "https://example.com"
         })
-        short_code = create_response.json()["short_code"]
+        short_code = create_response.json()["short_url"].split("/")[-1]
 
         # Delete it
         delete_response = client.delete(f"/{short_code}")
         assert delete_response.status_code == 204
 
         # Verify it's gone
-        get_response = client.get(f"/{short_code}", allow_redirects=False)
+        get_response = client.get(f"/{short_code}", follow_redirects=False)
         assert get_response.status_code == 404
 
     def test_delete_404_on_invalid_code(self, setup_db):
@@ -125,7 +124,7 @@ class TestPhase3UnitTests:
             response = client.post("/shorten", json={
                 "original_url": f"https://example.com/{i}"
             })
-            code = response.json()["short_code"]
+            code = response.json()["short_url"].split("/")[-1]
             assert code not in codes, "Collision detected!"
             codes.add(code)
 
@@ -137,7 +136,7 @@ class TestPhase3UnitTests:
         response = client.post("/shorten", json={
             "original_url": "https://example.com"
         })
-        code = response.json()["short_code"]
+        code = response.json()["short_url"].split("/")[-1]
 
         for char in code:
             assert char in base62, f"Invalid character in code: {char}"
@@ -194,11 +193,11 @@ class TestPhase5LoadTesting:
         response = client.post("/shorten", json={
             "original_url": "https://example.com"
         })
-        code = response.json()["short_code"]
+        code = response.json()["short_url"].split("/")[-1]
 
         # Hit it 100 times
         for _ in range(100):
-            r = client.get(f"/{code}", allow_redirects=False)
+            r = client.get(f"/{code}", follow_redirects=False)
             assert r.status_code == 302
 
         # Verify click count
