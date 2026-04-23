@@ -1,14 +1,18 @@
-# For Section 1, we're using a Monolithic architecture. Basically everything in one file: DB, models, routes etc..
+from contextlib import asynccontextmanager
+import threading
+import time
+from typing import Annotated, NoReturn
 
-
-from typing import Annotated
-
-from fastapi import Depends, FastAPI, HTTPException
+import redis
+from redis import RedisError, exceptions
+from app.cache import RedisCache
+from fastapi import Depends, FastAPI, HTTPException, BackgroundTasks
 from fastapi.responses import RedirectResponse
 from sqlalchemy import create_engine, Column, String, DateTime, Integer
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import Session, sessionmaker
-from pydantic import BaseModel
+from sqlalchemy.orm import Session
+from pydantic import BaseModel, Field
 import os
 from dotenv import load_dotenv
 import string
@@ -17,21 +21,32 @@ from datetime import datetime, timezone
 
 from sqlalchemy.exc import IntegrityError
 
-# Load environment variables
 load_dotenv()
 
-# Database setup
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./test.db")
-engine = create_engine(DATABASE_URL, connect_args={
-                       "check_same_thread": False} if "sqlite" in DATABASE_URL else {})
-SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+BASE_URL = os.getenv("BASE_URL", "http://localhost:8000")
+
+if "sqlite" in DATABASE_URL:
+    engine = create_engine(DATABASE_URL, connect_args={
+        "check_same_thread": False}, pool_timeout=5, pool_recycle=3600, pool_pre_ping=True)
+else:
+    engine = create_engine(DATABASE_URL, connect_args={}, pool_timeout=5, pool_recycle=3600, pool_pre_ping=True)
+
+if "sqlite" in DATABASE_URL:
+    sync_engine = create_engine(DATABASE_URL, connect_args={
+        "check_same_thread": False}, pool_timeout=5, pool_recycle=3600, pool_pre_ping=True)
+else:
+    sync_engine = create_engine(DATABASE_URL, connect_args={}, pool_timeout=5, pool_recycle=3600, pool_pre_ping=True)
 Base = declarative_base()
+
+
+r = redis.Redis(host=os.getenv("REDIS_HOST", "localhost"), port=6379, db=0, decode_responses=True)
+r = RedisCache(redis_client=r)
 
 # === Models ===
 
 
-class Code(Base):  # DB Model
-
+class Code(Base):
     __tablename__ = "codes"
 
     id = Column(Integer, primary_key=True)
@@ -44,28 +59,27 @@ class Code(Base):  # DB Model
         timezone.utc), nullable=False)
 
 
-# Request Model using Pydantic as it's not stored in the db. We only include data that the user provides in the request.
 class URLRequest(BaseModel):
-    original_url: str
+    original_url: str = Field(min_length=10, max_length=1500)
 
 
-# Response Model also using Pydantic as it's not stored in the db.
 class URLResponse(BaseModel):
 
-    # https://www.shorturl.com/123456ABC0
+    # https://www.localhost:8000/123456ABC0
     short_url: str
-    created_at: datetime  # Just for testing
-    # original_url added for confirmation on user side. What if they made a typo? Then they can see they did so
+    created_at: datetime
     original_url: str
 
 
-# Creates all tables
+class StatsResponse(BaseModel):
+    clicks: int
+    created_at: datetime
+    original_url: str
+
+
 Base.metadata.create_all(bind=engine)
 
-# === Endpoints ===
-
-# FastAPI app
-app = FastAPI()
+# === Session and context management
 
 
 def get_session():
@@ -76,32 +90,82 @@ def get_session():
 SessionDep = Annotated[Session, Depends(get_session)]
 
 
+def increment_click(short_code: str) -> None:
+    r.increment(f"clicks:{short_code}")
+
+
+def every(seconds: float, func, *args, **kwargs) -> NoReturn:
+    while True:
+        func(*args, **kwargs)
+        time.sleep(seconds)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    t = threading.Thread(target=every, args=(30, sync_to_db), daemon=True)
+    t.start()
+    yield
+
+
+def sync_to_db() -> None:
+    with Session(sync_engine) as session:
+        try:
+            keys = r.keys("clicks:*")
+            for key in keys:
+                short_code = key.removeprefix("clicks:")
+                url = session.query(Code).filter_by(
+                    short_code_chars=short_code).one_or_none()
+                if url:
+                    clicks = r.get(key)
+                    url.clicks = clicks
+            session.commit()
+
+        except exceptions.RedisError:
+            print("Redis is down")
+        except IntegrityError:
+            session.rollback()
+        except SQLAlchemyError as e:
+            print(f"SQLAlchemy Error: {e}")
+
+
+app = FastAPI(lifespan=lifespan)
+
+
+# === Endpoints ===
+
+
 @app.get("/health")
-async def root():
+def root():
+
     return {"status": "ok"}
 
 
 @app.get("/{short_code}")
-async def get_code(short_code: str, session: SessionDep):
-    url = session.query(Code).filter_by(
-        short_code_chars=short_code).one_or_none()
-    if not url:
-        raise HTTPException(status_code=404, detail="URL not found")
+def get_code(short_code: str, session: SessionDep, background_tasks: BackgroundTasks) -> RedirectResponse:
+    cached_url = r.get(short_code)
+    if cached_url:
+        background_tasks.add_task(increment_click, short_code)
+        return RedirectResponse(cached_url, status_code=302)
     else:
-        url.clicks += 1
-        session.commit()
-        return RedirectResponse(url.original_url, status_code=302)
-
-
-# Just for testing purposes
-@app.delete("/urls", status_code=204)
-async def delete_all_codes(session: SessionDep):
-    session.query(Code).delete()
-    session.commit()
+        # Not in cache, try db
+        url = session.query(Code).filter_by(
+            short_code_chars=short_code).one_or_none()
+        if not url:
+            raise HTTPException(status_code=404, detail="URL not found")
+        else:
+            r.set(short_code, url.original_url)
+            r.set(f"clicks:{short_code}", url.clicks)
+            background_tasks.add_task(increment_click, short_code)
+            return RedirectResponse(url.original_url, status_code=302)
 
 
 @app.delete("/{short_code}", status_code=204)
-async def delete_code(short_code: str, session: SessionDep):
+def delete_code(short_code: str, session: SessionDep) -> None:
+
+    cached_url = r.get(short_code)
+    if cached_url:
+        r.delete(short_code)
+
     url = session.query(Code).filter_by(
         short_code_chars=short_code).one_or_none()
     if not url:
@@ -109,30 +173,40 @@ async def delete_code(short_code: str, session: SessionDep):
     else:
         session.delete(url)
         session.commit()
-        return {"short_code": short_code}
 
 
 @app.get("/stats/{short_code}")
-async def get_stats(short_code: str, session: SessionDep):
-    url = session.query(Code).filter_by(
+def get_stats(short_code: str, session: SessionDep) -> StatsResponse:
+    # For this function, as clicks gets updated very frequently and the original url and created_at are static,
+    # we call clicks from the cache and the other two from the db. This works because get_stats isn't called
+    # nearly as much as get_code.
+
+    try:
+        original_url = None
+        clicks = r.get_int(f"clicks:{short_code}")
+
+        cached_url = r.get(short_code)
+        if cached_url:
+            original_url = str(cached_url)
+    except RedisError:
+        clicks = None
+        original_url = None
+    db_row = session.query(Code).filter_by(
         short_code_chars=short_code).one_or_none()
-    if not url:
+    if not db_row:
         raise HTTPException(status_code=404, detail="URL not found")
     else:
-        clicks = url.clicks
-        created_at = url.created_at
-        original_url = url.original_url
+        if not original_url:
+            original_url = db_row.original_url
+        if not clicks:
+            clicks = db_row.clicks
 
-        return {"clicks": clicks, "created_at": created_at, "original_url": original_url}
+    created_at = db_row.created_at
+    return StatsResponse(clicks=clicks, created_at=created_at, original_url=original_url)
 
 
 @app.post("/shorten", status_code=201)
-async def shorten(url_request: URLRequest, session: SessionDep):
-    if url_request.original_url == "":
-        raise HTTPException(
-            status_code=400,
-            detail="URL given is empty"
-        )
+def shorten(url_request: URLRequest, session: SessionDep) -> URLResponse:
 
     # If the URL doesn't start with http:// or https://, add it
     original_url = url_request.original_url
@@ -140,9 +214,8 @@ async def shorten(url_request: URLRequest, session: SessionDep):
         original_url = "https://" + original_url
 
     # Retry up to 10 times in case of a short code collision
-    for count in range(10):
+    for _ in range(10):
         try:
-            # First step: Generate a list of 10 random alphanumeric chars
             chars = string.ascii_letters + string.digits
             short_code_chars = "".join(random.choices(chars, k=10))
 
@@ -155,7 +228,7 @@ async def shorten(url_request: URLRequest, session: SessionDep):
 
             response = URLResponse(
 
-                short_url=f"http://localhost:8000/{short_code_chars}",
+                short_url=f"{BASE_URL}/{short_code_chars}",
                 created_at=model.created_at,
                 original_url=original_url
             )
@@ -163,17 +236,10 @@ async def shorten(url_request: URLRequest, session: SessionDep):
             return response
 
         except IntegrityError:
-            # If we get here, the db is in a failed state. This reverts to an unfailed state
             session.rollback()
             continue
 
-        except Exception as e:
-            # If the original url is too long, a too_long error is returned
-            if "too long" in str(e):
-                raise HTTPException(status_code=400, detail="URL too long")
-
-        if count == 9:
-            raise HTTPException(
-                status_code=500,
-                detail="Failed to generate unique short code after 10 attempts. Please try again."
-            )
+    raise HTTPException(
+        status_code=500,
+        detail="Failed to generate unique short code after 10 attempts. Please try again."
+    )

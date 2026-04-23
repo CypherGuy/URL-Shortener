@@ -16,11 +16,36 @@ jobs:
         with:
           path: "app tests"
 
+  check_requirements:
+    runs-on: ubuntu-latest
+    name: Check requirements
+    needs: flake8-lint
+    steps:
+      - name: Check out source repository
+        uses: actions/checkout@v4
+      - name: Set up Python environment
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install pip-tools
+        run: pip install pip-tools
+      - name: Check requirements are up to date
+        run: pip-compile --dry-run requirements.in
+
   test:
     runs-on: ubuntu-latest
     name: Test
-    needs: flake8-lint
+    needs: check_requirements
     services:
+      redis:
+        image: redis:7
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
       postgres:
         image: postgres:15
         env:

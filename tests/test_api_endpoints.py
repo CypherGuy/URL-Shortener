@@ -53,7 +53,7 @@ class TestPhase2CoreEndpoints:
         response = client.post("/shorten", json={
             "original_url": ""
         })
-        assert response.status_code == 400
+        assert response.status_code == 422
 
     def test_get_redirect_returns_302(self, setup_db):
         """✓ GET /{code} returns 302 redirect"""

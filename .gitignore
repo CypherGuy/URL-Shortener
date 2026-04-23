@@ -1,1 +1,12 @@
 .env
+test.db
+.DS_Store
+**/__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+dist/
+build/
+.pytest_cache/
+.coverage
