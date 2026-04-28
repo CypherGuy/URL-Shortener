@@ -1,245 +1,75 @@
 from contextlib import asynccontextmanager
-import threading
-import time
-from typing import Annotated, NoReturn
+from typing import Annotated
 
 import redis
-from redis import RedisError, exceptions
-from app.cache import RedisCache
-from fastapi import Depends, FastAPI, HTTPException, BackgroundTasks
-from fastapi.responses import RedirectResponse
-from sqlalchemy import create_engine, Column, String, DateTime, Integer
-from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.ext.declarative import declarative_base
+from fastapi import Depends, FastAPI
 from sqlalchemy.orm import Session
-from pydantic import BaseModel, Field
-import os
-from dotenv import load_dotenv
-import string
-import random
-from datetime import datetime, timezone
 
-from sqlalchemy.exc import IntegrityError
+from app.cache import RedisCache
+from app.config import BASE_URL, DATABASE_URL, READ_REPLICA_URL, REDIS_HOST, REDIS_PORT
+from app.db import Base, make_engine
+from app.routes.health import router as health_router
+from app.routes.urls import create_urls_router
+from app.sync_jobs import lifespan as sync_lifespan
+from app.sync_jobs import sync_to_db as sync_to_db_job
+from app.sync_jobs import sync_to_replica as sync_to_replica_job
 
-load_dotenv()
+web_engine = make_engine(DATABASE_URL)
+web_replica_engine = make_engine(READ_REPLICA_URL)
+sync_engine = make_engine(DATABASE_URL)
+sync_replica_engine = make_engine(READ_REPLICA_URL)
 
-DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./test.db")
-BASE_URL = os.getenv("BASE_URL", "http://localhost:8000")
+redis_client = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=0, decode_responses=True)
+r = RedisCache(redis_client=redis_client)
 
-if "sqlite" in DATABASE_URL:
-    engine = create_engine(DATABASE_URL, connect_args={
-        "check_same_thread": False}, pool_timeout=5, pool_recycle=3600, pool_pre_ping=True)
-else:
-    engine = create_engine(DATABASE_URL, connect_args={}, pool_timeout=5, pool_recycle=3600, pool_pre_ping=True)
-
-if "sqlite" in DATABASE_URL:
-    sync_engine = create_engine(DATABASE_URL, connect_args={
-        "check_same_thread": False}, pool_timeout=5, pool_recycle=3600, pool_pre_ping=True)
-else:
-    sync_engine = create_engine(DATABASE_URL, connect_args={}, pool_timeout=5, pool_recycle=3600, pool_pre_ping=True)
-Base = declarative_base()
-
-
-r = redis.Redis(host=os.getenv("REDIS_HOST", "localhost"), port=6379, db=0, decode_responses=True)
-r = RedisCache(redis_client=r)
-
-# === Models ===
-
-
-class Code(Base):
-    __tablename__ = "codes"
-
-    id = Column(Integer, primary_key=True)
-    clicks = Column(Integer, default=0, nullable=False)
-    short_code_chars = Column(String, nullable=False,
-                              unique=True)  # 123456ABC0
-    original_url = Column(String(1500), nullable=False)
-    created_at = Column(DateTime, default=lambda: datetime.now(
-        # Lambda ensures the timestamp is set at insert time, not when the module loads
-        timezone.utc), nullable=False)
-
-
-class URLRequest(BaseModel):
-    original_url: str = Field(min_length=10, max_length=1500)
-
-
-class URLResponse(BaseModel):
-
-    # https://www.localhost:8000/123456ABC0
-    short_url: str
-    created_at: datetime
-    original_url: str
-
-
-class StatsResponse(BaseModel):
-    clicks: int
-    created_at: datetime
-    original_url: str
-
-
-Base.metadata.create_all(bind=engine)
-
-# === Session and context management
+Base.metadata.create_all(bind=web_engine)
+Base.metadata.create_all(bind=web_replica_engine)
 
 
 def get_session():
-    with Session(engine) as session:
+    with Session(web_engine) as session:
+        yield session
+
+
+def get_replica_session():
+    with Session(web_replica_engine) as session:
         yield session
 
 
 SessionDep = Annotated[Session, Depends(get_session)]
+ReplicaSessionDep = Annotated[Session, Depends(get_replica_session)]
+
+
+def get_cache() -> RedisCache:
+    return r
 
 
 def increment_click(short_code: str) -> None:
-    r.increment(f"clicks:{short_code}")
+    get_cache().increment(f"clicks:{short_code}")
 
 
-def every(seconds: float, func, *args, **kwargs) -> NoReturn:
-    while True:
-        func(*args, **kwargs)
-        time.sleep(seconds)
+def sync_to_db() -> None:
+    sync_to_db_job(get_cache(), sync_engine)
+
+
+def sync_to_replica() -> None:
+    sync_to_replica_job(sync_engine, sync_replica_engine)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    t = threading.Thread(target=every, args=(30, sync_to_db), daemon=True)
-    t.start()
-    yield
-
-
-def sync_to_db() -> None:
-    with Session(sync_engine) as session:
-        try:
-            keys = r.keys("clicks:*")
-            for key in keys:
-                short_code = key.removeprefix("clicks:")
-                url = session.query(Code).filter_by(
-                    short_code_chars=short_code).one_or_none()
-                if url:
-                    clicks = r.get(key)
-                    url.clicks = clicks
-            session.commit()
-
-        except exceptions.RedisError:
-            print("Redis is down")
-        except IntegrityError:
-            session.rollback()
-        except SQLAlchemyError as e:
-            print(f"SQLAlchemy Error: {e}")
+    async with sync_lifespan(app, sync_to_db, sync_to_replica):
+        yield
 
 
 app = FastAPI(lifespan=lifespan)
-
-
-# === Endpoints ===
-
-
-@app.get("/health")
-def root():
-
-    return {"status": "ok"}
-
-
-@app.get("/{short_code}")
-def get_code(short_code: str, session: SessionDep, background_tasks: BackgroundTasks) -> RedirectResponse:
-    cached_url = r.get(short_code)
-    if cached_url:
-        background_tasks.add_task(increment_click, short_code)
-        return RedirectResponse(cached_url, status_code=302)
-    else:
-        # Not in cache, try db
-        url = session.query(Code).filter_by(
-            short_code_chars=short_code).one_or_none()
-        if not url:
-            raise HTTPException(status_code=404, detail="URL not found")
-        else:
-            r.set(short_code, url.original_url)
-            r.set(f"clicks:{short_code}", url.clicks)
-            background_tasks.add_task(increment_click, short_code)
-            return RedirectResponse(url.original_url, status_code=302)
-
-
-@app.delete("/{short_code}", status_code=204)
-def delete_code(short_code: str, session: SessionDep) -> None:
-
-    cached_url = r.get(short_code)
-    if cached_url:
-        r.delete(short_code)
-
-    url = session.query(Code).filter_by(
-        short_code_chars=short_code).one_or_none()
-    if not url:
-        raise HTTPException(status_code=404, detail="URL not found")
-    else:
-        session.delete(url)
-        session.commit()
-
-
-@app.get("/stats/{short_code}")
-def get_stats(short_code: str, session: SessionDep) -> StatsResponse:
-    # For this function, as clicks gets updated very frequently and the original url and created_at are static,
-    # we call clicks from the cache and the other two from the db. This works because get_stats isn't called
-    # nearly as much as get_code.
-
-    try:
-        original_url = None
-        clicks = r.get_int(f"clicks:{short_code}")
-
-        cached_url = r.get(short_code)
-        if cached_url:
-            original_url = str(cached_url)
-    except RedisError:
-        clicks = None
-        original_url = None
-    db_row = session.query(Code).filter_by(
-        short_code_chars=short_code).one_or_none()
-    if not db_row:
-        raise HTTPException(status_code=404, detail="URL not found")
-    else:
-        if not original_url:
-            original_url = db_row.original_url
-        if not clicks:
-            clicks = db_row.clicks
-
-    created_at = db_row.created_at
-    return StatsResponse(clicks=clicks, created_at=created_at, original_url=original_url)
-
-
-@app.post("/shorten", status_code=201)
-def shorten(url_request: URLRequest, session: SessionDep) -> URLResponse:
-
-    # If the URL doesn't start with http:// or https://, add it
-    original_url = url_request.original_url
-    if not original_url.startswith(("http://", "https://")):
-        original_url = "https://" + original_url
-
-    # Retry up to 10 times in case of a short code collision
-    for _ in range(10):
-        try:
-            chars = string.ascii_letters + string.digits
-            short_code_chars = "".join(random.choices(chars, k=10))
-
-            model = Code(short_code_chars=short_code_chars,
-                         original_url=original_url)
-
-            session.add(model)
-            session.commit()
-            session.refresh(model)
-
-            response = URLResponse(
-
-                short_url=f"{BASE_URL}/{short_code_chars}",
-                created_at=model.created_at,
-                original_url=original_url
-            )
-
-            return response
-
-        except IntegrityError:
-            session.rollback()
-            continue
-
-    raise HTTPException(
-        status_code=500,
-        detail="Failed to generate unique short code after 10 attempts. Please try again."
+app.include_router(health_router)
+app.include_router(
+    create_urls_router(
+        get_session=get_session,
+        get_replica_session=get_replica_session,
+        get_cache=get_cache,
+        increment_click=increment_click,
+        base_url=BASE_URL,
     )
+)

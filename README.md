@@ -2,58 +2,50 @@
 
 ![CI](https://github.com/CypherGuy/URL-Shortener/actions/workflows/run-ci.yml/badge.svg)
 
-A production-oriented URL shortener built as a multi-section course in System Design fundamentals. Each section deliberately introduces a new layer of architectural complexity, starting from a working monolith, then evolving toward a distributed system. This is Section 2.
+A production-oriented URL shortener built as a multi-section course in System Design fundamentals. Each section deliberately introduces a new layer of architectural complexity, starting from a working monolith, then evolving toward a distributed system. This is Section 3.
 
 **Stack:** FastAPI · PostgreSQL · SQLAlchemy · Redis · Docker · GitHub Actions
 
 ---
 
-## Section 2 — Caching & Async Write Decoupling
+## Section 3 - Read Replica & Connection Pool Isolation
 
-Section 1 established a working baseline and load tested it to find where it breaks. The system collapsed at around 100 concurrent users with a 97% failure rate. The root cause was database write contention: every redirect performed a synchronous click counter `UPDATE`, and every URL creation performed an `INSERT` — both competing for the same connection pool under load.
+Section 2 reduced the database bottleneck by caching reads in Redis and moving click tracking off the critical path. At 500 users the system stayed alive with a 2.3% failure rate, but `POST /shorten` was still failing at 5.6% - every URL creation hits PostgreSQL directly with no cache benefit, and writes competed with reads for the same connection pool.
 
-Section 2 reduces database pressure without touching the main infrastructure. From the last milestone, I've made three main changes in order to reduce the bottleneck from the database:
+Section 3 addresses this at the database layer by introducing a read replica and isolating connection pools across concerns.
 
-**1. Redis cache-aside on redirects**
+**1. Read/write split**
 
-Every `GET /{short_code}` checks Redis, an in-memory cache, before PostgreSQL. On a cache hit, the redirect is served entirely from memory without touching the database. On a miss, the URL is fetched from PostgreSQL and stored in Redis with a 1-hour TTL. Once another request for the same URL comes through, it's thus a hit if done within an hour.
+All read traffic (`GET /{short_code}` cache misses, `GET /stats`) is routed to a replica database via a dedicated `ReplicaSessionDep`. The primary database now handles writes only (`POST /shorten`, `DELETE /{short_code}`), freeing its connection pool exclusively for write operations.
 
-**2. Async click tracking**
+**2. Manual replica sync**
 
-Click increments are removed from the redirect critical path entirely. A `BackgroundTask` increments a Redis counter after the response is sent. Having this means the user never waits for a database write on redirect.
+Since this runs locally without PostgreSQL streaming replication, a background thread syncs the primary to the replica every 60 seconds. It compares short codes across both databases, deletes stale rows from the replica, and upserts all primary rows atomically. On AWS this thread would be removed entirely - RDS Read Replicas use WAL streaming and stay in sync within milliseconds automatically.
 
-**3. Batch flush to PostgreSQL**
+**3. Four isolated connection pools**
 
-In order to have changes from Redis persist, a background thread runs every 30 seconds which reads all keys beginning with `clicks:*` (These keys track clicks per short_code) from Redis, and writes the updated values back to PostgreSQL. Click counts eventually persist without blocking requests.
+Each concern gets its own engine and connection pool to prevent one operation from starving another:
 
 ```
-┌─────────────────────────────────────────────────┐
-│                   app/main.py                   │
-│                                                 │
-│  GET /{code}                                    │
-│      ↓                                          │
-│  Redis lookup                                   │
-│      ↓ cache hit (~80%)    ↓ cache miss (~20%) │
-│  Redirect immediately    PostgreSQL lookup      │
-│  + background increment   + populate cache      │
-│                           + Redirect            │
-│                                                 │
-│  Background thread (every 30s)                  │
-│      Redis clicks:* → PostgreSQL UPDATE         │
-└─────────────────────────────────────────────────┘
+web_engine          → request handlers (writes)
+web_replica_engine  → request handlers (reads)
+sync_engine         → Redis → primary flush thread (every 30s)
+sync_replica_engine → primary → replica sync thread (every 60s)
 ```
+
+At scale, four engines would be replaced with a single connection to PgBouncer or RDS Proxy, which manages real PostgreSQL connections centrally.
 
 ---
 
 ## API
 
-| Method   | Path                  | Status | Description                                                  |
-| -------- | --------------------- | ------ | ------------------------------------------------------------ |
-| `POST`   | `/shorten`            | 201    | Accepts a long URL, returns a 10-character base62 short code and the original URL for confirmation |
-| `GET`    | `/{short_code}`       | 302    | Resolves a short code and redirects to the original URL      |
-| `GET`    | `/stats/{short_code}` | 200    | Returns click count, creation time, and original URL         |
-| `DELETE` | `/{short_code}`       | 204    | Removes a short code from the database and cache             |
-| `GET`    | `/health`             | 200    | Health check                                                 |
+| Method   | Path                  | Status | Description                                                                       |
+| -------- | --------------------- | ------ | --------------------------------------------------------------------------------- |
+| `POST`   | `/shorten`            | 201    | Accepts a long URL, returns a 10-character base62 short code and the original URL |
+| `GET`    | `/{short_code}`       | 302    | Resolves a short code and redirects to the original URL                           |
+| `GET`    | `/stats/{short_code}` | 200    | Returns click count, creation time, and original URL                              |
+| `DELETE` | `/{short_code}`       | 204    | Removes a short code from the database and cache                                  |
+| `GET`    | `/health`             | 200    | Health check                                                                      |
 
 Interactive docs available at `http://localhost:8000/docs` when running.
 
@@ -61,12 +53,15 @@ Interactive docs available at `http://localhost:8000/docs` when running.
 
 ## Running Locally
 
-**Prerequisites:** Docker Desktop, Redis
+**Prerequisites:** Docker Desktop, Redis, PostgreSQL
 
 ```bash
 # Start Redis
 brew install redis
 brew services start redis
+
+# Start PostgreSQL (adjust version as needed)
+brew services start postgresql@17
 
 # Start the app
 git clone https://github.com/CypherGuy/URL-Shortener.git
@@ -76,10 +71,10 @@ docker compose up --build
 
 This starts two containers:
 
-- `db` — PostgreSQL 15, with a named volume so data persists across restarts
-- `app` — FastAPI on port 8000, waits for the database healthcheck before starting
+- `db` - PostgreSQL 15, with a named volume so data persists across restarts
+- `app` - FastAPI on port 8000, waits for the database healthcheck before starting
 
-Redis runs on the host machine (not in Docker) and is accessible at `localhost:6379`.
+Redis and PostgreSQL run on the host machine. Set `READ_REPLICA_URL` in your `.env` to point to a second database for a genuine read/write split.
 
 The app is available at `http://localhost:8000`.
 
@@ -143,36 +138,40 @@ Then open `http://localhost:8089` to configure and start the test.
 
 **100 concurrent users**
 
-| Metric         | Section 1 | Section 2 | Change      |
-| -------------- | --------- | --------- | ----------- |
-| Throughput     | 108 RPS   | 327.8 RPS | +3x         |
-| Failure rate   | 0%        | 0%        | —           |
-| Median latency | 8ms       | 3ms       | 2.7x faster |
-| GET p99        | 680ms     | 260ms     | 2.6x faster |
+| Metric         | Section 1 | Section 2 | Section 3 | Change (S2→S3)    |
+| -------------- | --------- | --------- | --------- | ----------------- |
+| Throughput     | 108 RPS   | 327.8 RPS | 297.9 RPS | Marginal drop     |
+| Failure rate   | 0%        | 0%        | 0%        | -                 |
+| Median latency | 8ms       | 3ms       | 3ms       | Stable            |
+| POST median    | 8ms       | 40ms      | 5ms       | ✅ 8x faster      |
+| GET p99        | 680ms     | 260ms     | 500ms     | ⚠️ Slightly worse |
 
 **500 concurrent users**
 
-| Metric         | Section 1            | Section 2 | Change                                             |
-| -------------- | -------------------- | --------- | -------------------------------------------------- |
-| Throughput     | 34.5 RPS (collapsed) | ~176 RPS  | System survived                                    |
-| Failure rate   | 97%                  | 2.3%      | From catastrophic collapse to marginal degradation |
-| Median latency | 7,800ms              | 5ms       | 1,560x faster                                      |
+| Metric         | Section 1            | Section 2 | Section 3 | Change (S2→S3)           |
+| -------------- | -------------------- | --------- | --------- | ------------------------ |
+| Throughput     | 34.5 RPS (collapsed) | ~176 RPS  | ~200 RPS  | ✅ Higher peak           |
+| Failure rate   | 97%                  | 2.3%      | 2.2%      | ✅ Marginally better     |
+| Total requests | ~13k                 | ~52k      | ~95k      | ✅ 2x more (longer test) |
+| Median latency | 7,800ms              | 5ms       | 10ms      | ⚠️ Higher locally        |
 
-Section 1 collapsed entirely before reaching 100 users. Section 2 reached and sustained 500 users with graceful degradation rather than catastrophic failure.
+### Local Test Limitations
 
-### Remaining Bottleneck
+The most recent results suffer from local resource contention as much as architectural improvement. Locust (the load generator) and the app run on the same machine, competing for CPU and memory. The manual 60-second replica sync also creates periodic latency spikes visible in the response time graph.
 
-`POST /shorten` carries a 5.6% failure rate at 500 users — the highest of any endpoint. Every URL creation still hits PostgreSQL directly with no cache benefit. Under heavy write load the connection pool exhausts and requests timeout. This is the target for Section 3.
+You would get the full benefits of a read replica when the replica is a physically separate machine. That happens in Section 4 on AWS RDS Read Replicas, which have real WAL streaming replication.
 
 ---
 
-## What's Next — Section 3
+## What's Next - Section 4
 
-The remaining bottleneck is write contention on `POST /shorten`. Section 3 will address this at the database layer before moving to infrastructure:
+Section 3 establishes the correct architecture locally. Section 4 moves to AWS to validate it under realistic conditions:
 
-- **Read replicas** — route read traffic to replicas, freeing the primary for writes only
-- **AWS deployment** — EC2, RDS, ElastiCache, ALB
-- **Horizontal scaling** — multiple app instances behind a load balancer
+- **EC2** - deploy the app on a real server separate from the load generator
+- **RDS** - managed PostgreSQL with a native Read Replica (WAL streaming, millisecond lag)
+- **ElastiCache** - managed Redis
+- **ALB** - Application Load Balancer distributing traffic across multiple EC2 instances
+- **CloudWatch** - monitoring, alerting, and observability
 
 ---
 
@@ -180,20 +179,32 @@ The remaining bottleneck is write contention on `POST /shorten`. Section 3 will 
 
 ### Why sync over async
 
-FastAPI runs sync endpoints in a threadpool, so concurrent request handling still works without `async def`. The hot path is Redis (~0.1ms operations), so async wouldn't meaningfully help there. The database is only hit on cache misses and the 30-second background sync — neither are latency-critical. A deliberate tradeoff, not an oversight. If the remaining DB calls became a bottleneck, switching to `asyncpg` + `AsyncSession` would be the next step.
+FastAPI runs sync endpoints in a threadpool, so concurrent request handling still works without needing `async def`. The hot path is Redis, and async wouldn't really help there. The database is only hit on cache misses and the 30-second background sync - neither are latency-critical. If the remaining DB calls become a bottleneck later on, using `asyncpg` and `AsyncSession` would be the next step.
 
-### Why two engines (`engine` and `sync_engine`)
+### Why four engines
 
-The background sync thread holds a DB connection open for the duration of each sync cycle. If it shared a pool with the web request handlers, a slow sync (e.g. Postgres under load) could exhaust the pool and starve incoming web requests of connections. Two engines provide a hard isolation guarantee: sync traffic can never affect web request latency regardless of what the sync is doing. The tradeoff is double the connections to Postgres — a known cost, and one that would be addressed with a connection pooler like PgBouncer at scale.
+Each background thread and each request handler type gets its own connection pool to prevent one concern from starving another. The background replica sync holds connections open for the duration of each cycle - if it shared a pool with web request handlers, a slow sync could exhaust connections and cause request timeouts. Four engines provide hard isolation guarantees. The tradeoff is four connection pools consuming PostgreSQL connections - addressed at scale with PgBouncer or RDS Proxy.
 
 ### Why Redis for click counting
 
-Every redirect was hitting the database to increment a click counter. Under load this serialised — Postgres can only process so many concurrent writes, so requests queued behind each other. Redis increments are in-memory and effectively instant, removing writes from the hot path entirely. Clicks are flushed to Postgres in bulk every 30 seconds. The accepted tradeoff: up to 30 seconds of click data could be lost if the app crashes between syncs — acceptable for an analytics counter, not acceptable for payments.
+Every time the database was hit for a redirect, a click was incremented. Under load, this became a bottleneck because requests kept getting queued, and the queue became bigger over time.
+
+Redis increments are stored in memory and are basically instant, which removes writes from the hot path entirely. In this case, clicks are flushed to Postgres in bulk every 30 seconds. However, there's a tradeoff to this I accepted: up to 30 seconds of click data could be lost if the app crashes between syncs. This is acceptable for an analytics counter, but not acceptable for something like payments.
+
+### Why the replica sync is a full table scan
+
+The manual sync reads all rows from the primary and reconciles them against the replica on every cycle. An incremental approach (only sync rows modified since last run) would require an `updated_at` column and additional bookkeeping. For a learning project with thousands of rows, the full scan is acceptable. At scale this would be unnecessary - real PostgreSQL replication handles it automatically via WAL streaming.
+
+### Why batch sync every 30 seconds / replica sync every 60 seconds
+
+The Redis→primary flush runs every 30 seconds - short enough that click counts are reasonably fresh for stats queries, long enough that DB write overhead is negligible. The replica sync runs every 60 seconds - less frequent because URL data changes far less often than click counts, and the full table scan is more expensive than a click flush.
 
 ### Pydantic vs SQLAlchemy models
 
-Pydantic models (`URLRequest`, `URLResponse`) define what enters and leaves the API — they validate request data and shape responses but are never persisted. SQLAlchemy models (`Code`) map to database tables and handle all persistence. Keeping them separate means validation logic and storage logic don't bleed into each other.
+Pydantic models (`URLRequest`, `URLResponse`, `StatsResponse`) define what enters and leaves the API - they validate request data and shape responses but are never persisted. SQLAlchemy models (`Code`) map to database tables and handle all persistence. Keeping them separate means validation logic and storage logic don't bleed into each other.
 
-### Why batch sync every 30 seconds
+---
 
-Short enough that click counts are reasonably fresh for stats queries. Long enough that the DB write overhead is negligible. The interval is arbitrary and tunable — the architecture supports changing it without code changes beyond the constant.
+## License
+
+MIT

@@ -1,4 +1,4 @@
-from app.main import app, engine, Base
+from app.main import app, web_engine, web_replica_engine, Base, get_session, get_replica_session
 import pytest
 from fastapi.testclient import TestClient
 import os
@@ -7,16 +7,19 @@ import sys
 # Add app to path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-
 client = TestClient(app)
 
 
 @pytest.fixture(scope="function")
 def setup_db():
     """Setup and teardown database for each test"""
-    Base.metadata.create_all(bind=engine)
+    Base.metadata.create_all(bind=web_engine)
+    Base.metadata.create_all(bind=web_replica_engine)
+    app.dependency_overrides[get_replica_session] = get_session
     yield
-    Base.metadata.drop_all(bind=engine)
+    app.dependency_overrides.pop(get_replica_session, None)
+    Base.metadata.drop_all(bind=web_engine)
+    Base.metadata.drop_all(bind=web_replica_engine)
 
 
 class TestPhase1RepositorySetup:

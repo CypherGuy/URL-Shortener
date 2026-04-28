@@ -2,6 +2,7 @@ from locust import HttpUser, task, between
 
 
 class URLShortenerUser(HttpUser):
+    host = "http://localhost:8000"
     wait_time = between(0.1, 0.5)
 
     def on_start(self):
