@@ -1,4 +1,8 @@
-from app.main import app, web_engine, web_replica_engine, Base, get_session, get_replica_session
+import fakeredis
+import app.main as main_module
+from app.main import app, web_engine, web_replica_engine, Base, get_session, get_replica_session, get_cache
+from app.cache import RedisCache
+from unittest.mock import patch
 import pytest
 from fastapi.testclient import TestClient
 import os
@@ -15,8 +19,12 @@ def setup_db():
     """Setup and teardown database for each test"""
     Base.metadata.create_all(bind=web_engine)
     Base.metadata.create_all(bind=web_replica_engine)
+    fake_cache = RedisCache(redis_client=fakeredis.FakeStrictRedis(decode_responses=True))
     app.dependency_overrides[get_replica_session] = get_session
-    yield
+    app.dependency_overrides[get_cache] = lambda: fake_cache
+    with patch.object(main_module, 'r', fake_cache):
+        yield
+    app.dependency_overrides.pop(get_cache, None)
     app.dependency_overrides.pop(get_replica_session, None)
     Base.metadata.drop_all(bind=web_engine)
     Base.metadata.drop_all(bind=web_replica_engine)

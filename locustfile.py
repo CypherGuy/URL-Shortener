@@ -2,7 +2,7 @@ from locust import HttpUser, task, between
 
 
 class URLShortenerUser(HttpUser):
-    host = "http://localhost:8000"
+    host = "http://url-shortener-alb-1813126137.eu-west-2.elb.amazonaws.com"
     wait_time = between(0.1, 0.5)
 
     def on_start(self):

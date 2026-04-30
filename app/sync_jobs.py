@@ -36,39 +36,8 @@ def sync_to_db(cache, sync_engine) -> None:
             print(f"SQLAlchemy Error: {error}")
 
 
-def sync_to_replica(sync_engine, sync_replica_engine) -> None:
-    with Session(sync_engine) as session:
-        urls = session.query(Code).all()
-        session.expunge_all()
-
-    primary_codes = {url.short_code_chars for url in urls}
-
-    with Session(sync_replica_engine) as replica_session:
-        try:
-            replica_codes = {
-                code
-                for (code,) in replica_session.query(Code.short_code_chars).all()
-            }
-
-            stale = replica_codes - primary_codes
-            if stale:
-                replica_session.query(Code).filter(Code.short_code_chars.in_(stale)).delete()
-
-            for url in urls:
-                replica_session.merge(url)
-
-            replica_session.commit()
-
-        except IntegrityError:
-            replica_session.rollback()
-        except SQLAlchemyError as error:
-            print(f"SQLAlchemy Error: {error}")
-
-
 @asynccontextmanager
-async def lifespan(app, sync_to_db_func, sync_to_replica_func):
+async def lifespan(app, sync_to_db_func):
     thread_primary = threading.Thread(target=every, args=(30, sync_to_db_func), daemon=True)
-    thread_replica = threading.Thread(target=every, args=(60, sync_to_replica_func), daemon=True)
     thread_primary.start()
-    thread_replica.start()
     yield

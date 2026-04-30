@@ -1,20 +1,26 @@
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
+from sqlalchemy.pool import StaticPool
 from sqlalchemy.orm import Session
 from unittest.mock import patch
 import fakeredis
 from app.cache import RedisCache
 import app.main as main_module
-from app.main import app, Base, sync_to_replica
+from app.main import app, Base
 from app.models import Code
 
 # ─── Test Database URLs ───────────────────────────────────────────────────────
-PRIMARY_URL = "sqlite:///./test_primary.db"
-REPLICA_URL = "sqlite:///./test_replica.db"
-
-primary_test_engine = create_engine(PRIMARY_URL, connect_args={"check_same_thread": False})
-replica_test_engine = create_engine(REPLICA_URL, connect_args={"check_same_thread": False})
+primary_test_engine = create_engine(
+    "sqlite:///:memory:",
+    connect_args={"check_same_thread": False},
+    poolclass=StaticPool,
+)
+replica_test_engine = create_engine(
+    "sqlite:///:memory:",
+    connect_args={"check_same_thread": False},
+    poolclass=StaticPool,
+)
 
 
 # ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -338,151 +344,3 @@ class TestAppReadsFromReplica:
         response = client_with_replica.get("/stats/statsnorep1")
         assert response.status_code == 404
 
-
-# ─── Section 3: sync_to_replica() Tests ──────────────────────────────────────
-
-def _call_sync(primary_engine, replica_engine):
-    """Patch both engines and call sync_to_replica()."""
-    with patch.object(main_module, "sync_engine", primary_engine), \
-         patch.object(main_module, "sync_replica_engine", replica_engine):
-        sync_to_replica()
-
-
-class TestSyncToReplica:
-    """sync_to_replica() must make the replica an exact mirror of the primary."""
-
-    def test_row_on_primary_appears_on_replica_after_sync(self, setup_databases):
-        with Session(primary_test_engine) as s:
-            s.add(Code(short_code_chars="synca12345", original_url="https://example.com", clicks=3))
-            s.commit()
-
-        _call_sync(primary_test_engine, replica_test_engine)
-
-        with Session(replica_test_engine) as s:
-            row = s.query(Code).filter_by(short_code_chars="synca12345").one_or_none()
-            assert row is not None
-            assert row.original_url == "https://example.com"
-            assert row.clicks == 3
-
-    def test_row_on_replica_only_is_deleted_after_sync(self, setup_databases):
-        """A row that exists on the replica but not on primary must be removed."""
-        with Session(replica_test_engine) as s:
-            s.add(Code(short_code_chars="orphan1234", original_url="https://stale.com", clicks=0))
-            s.commit()
-
-        # Primary is empty — sync should wipe the orphan row from replica
-        _call_sync(primary_test_engine, replica_test_engine)
-
-        with Session(replica_test_engine) as s:
-            assert s.query(Code).filter_by(short_code_chars="orphan1234").one_or_none() is None
-
-    def test_empty_primary_clears_all_replica_rows(self, setup_databases):
-        """If primary has no rows, replica should end up empty regardless of prior state."""
-        with Session(replica_test_engine) as s:
-            for i in range(3):
-                s.add(Code(short_code_chars=f"stale{i:05d}", original_url="https://stale.com", clicks=0))
-            s.commit()
-
-        _call_sync(primary_test_engine, replica_test_engine)
-
-        with Session(replica_test_engine) as s:
-            assert s.query(Code).count() == 0
-
-    def test_both_empty_does_not_crash(self, setup_databases):
-        """Syncing two empty databases should complete without error."""
-        _call_sync(primary_test_engine, replica_test_engine)
-
-        with Session(replica_test_engine) as s:
-            assert s.query(Code).count() == 0
-
-    def test_updated_field_on_primary_reflected_in_replica(self, setup_databases):
-        """A click count update on primary should be visible on replica after sync."""
-        with Session(primary_test_engine) as s:
-            s.add(Code(short_code_chars="syncb12345", original_url="https://example.com", clicks=0))
-            s.commit()
-
-        _call_sync(primary_test_engine, replica_test_engine)
-
-        with Session(primary_test_engine) as s:
-            row = s.query(Code).filter_by(short_code_chars="syncb12345").one()
-            row.clicks = 42
-            s.commit()
-
-        _call_sync(primary_test_engine, replica_test_engine)
-
-        with Session(replica_test_engine) as s:
-            row = s.query(Code).filter_by(short_code_chars="syncb12345").one()
-            assert row.clicks == 42
-
-    def test_sync_is_idempotent(self, setup_databases):
-        """Calling sync_to_replica twice in a row should produce the same result."""
-        with Session(primary_test_engine) as s:
-            s.add(Code(short_code_chars="idemp12345", original_url="https://example.com", clicks=5))
-            s.commit()
-
-        _call_sync(primary_test_engine, replica_test_engine)
-        _call_sync(primary_test_engine, replica_test_engine)
-
-        with Session(replica_test_engine) as s:
-            assert s.query(Code).count() == 1
-            row = s.query(Code).filter_by(short_code_chars="idemp12345").one()
-            assert row.clicks == 5
-
-    def test_multiple_primary_rows_all_appear_on_replica(self, setup_databases):
-        with Session(primary_test_engine) as s:
-            for i in range(5):
-                s.add(Code(short_code_chars=f"multi{i:05d}", original_url=f"https://site{i}.com", clicks=i))
-            s.commit()
-
-        _call_sync(primary_test_engine, replica_test_engine)
-
-        with Session(replica_test_engine) as s:
-            assert s.query(Code).count() == 5
-            for i in range(5):
-                row = s.query(Code).filter_by(short_code_chars=f"multi{i:05d}").one_or_none()
-                assert row is not None
-                assert row.original_url == f"https://site{i}.com"
-                assert row.clicks == i
-
-    def test_partial_overlap_replica_matches_primary_exactly(self, setup_databases):
-        """
-        Primary: rows A and B.
-        Replica (stale): rows B and C.
-        After sync: replica should have exactly A and B — C must be gone.
-        """
-        with Session(primary_test_engine) as s:
-            s.add(Code(short_code_chars="overlap_a0", original_url="https://a.com", clicks=0))
-            s.add(Code(short_code_chars="overlap_b0", original_url="https://b.com", clicks=0))
-            s.commit()
-
-        with Session(replica_test_engine) as s:
-            s.add(Code(short_code_chars="overlap_b0", original_url="https://b.com", clicks=0))
-            s.add(Code(short_code_chars="overlap_c0", original_url="https://c.com", clicks=0))
-            s.commit()
-
-        _call_sync(primary_test_engine, replica_test_engine)
-
-        with Session(replica_test_engine) as s:
-            codes = {row.short_code_chars for row in s.query(Code).all()}
-            assert codes == {"overlap_a0", "overlap_b0"}
-            assert s.query(Code).filter_by(short_code_chars="overlap_c0").one_or_none() is None
-
-    def test_all_fields_preserved_faithfully(self, setup_databases):
-        """Every column (id, clicks, original_url, created_at) must be identical on replica."""
-        from datetime import datetime, timezone
-        ts = datetime(2025, 1, 1, 12, 0, 0, tzinfo=timezone.utc)
-
-        with Session(primary_test_engine) as s:
-            row = Code(short_code_chars="fields1234", original_url="https://full.com", clicks=99, created_at=ts)
-            s.add(row)
-            s.commit()
-            s.refresh(row)
-            primary_id = row.id
-
-        _call_sync(primary_test_engine, replica_test_engine)
-
-        with Session(replica_test_engine) as s:
-            replica_row = s.query(Code).filter_by(short_code_chars="fields1234").one()
-            assert replica_row.id == primary_id
-            assert replica_row.clicks == 99
-            assert replica_row.original_url == "https://full.com"

@@ -12,18 +12,15 @@ from app.routes.health import router as health_router
 from app.routes.urls import create_urls_router
 from app.sync_jobs import lifespan as sync_lifespan
 from app.sync_jobs import sync_to_db as sync_to_db_job
-from app.sync_jobs import sync_to_replica as sync_to_replica_job
 
 web_engine = make_engine(DATABASE_URL)
 web_replica_engine = make_engine(READ_REPLICA_URL)
 sync_engine = make_engine(DATABASE_URL)
-sync_replica_engine = make_engine(READ_REPLICA_URL)
 
 redis_client = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=0, decode_responses=True)
 r = RedisCache(redis_client=redis_client)
 
 Base.metadata.create_all(bind=web_engine)
-Base.metadata.create_all(bind=web_replica_engine)
 
 
 def get_session():
@@ -52,13 +49,9 @@ def sync_to_db() -> None:
     sync_to_db_job(get_cache(), sync_engine)
 
 
-def sync_to_replica() -> None:
-    sync_to_replica_job(sync_engine, sync_replica_engine)
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    async with sync_lifespan(app, sync_to_db, sync_to_replica):
+    async with sync_lifespan(app, sync_to_db):
         yield
 
 
