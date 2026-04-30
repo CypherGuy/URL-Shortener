@@ -21,7 +21,7 @@ with sqlite3.connect(_TEST_DB) as _init:
     _init.execute("PRAGMA journal_mode=WAL")
 
 
-def _make_test_engine(url: str):
+def _make_test_engine(url: str, **_kwargs):  # **_kwargs absorbs pool_size / max_overflow from make_engine callers
     def connect():
         conn = sqlite3.connect(_TEST_DB, check_same_thread=False)
         conn.execute("PRAGMA busy_timeout=5000")
