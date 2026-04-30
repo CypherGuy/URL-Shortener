@@ -11,3 +11,4 @@ build/
 .pytest_cache/
 .coverage
 **/.DS_Store
+BUGS.md
