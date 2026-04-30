@@ -10,7 +10,8 @@ def make_engine(url: str):
         pool_timeout=5,
         pool_recycle=3600,
         pool_pre_ping=True,
-        pool_size=10,
+        pool_size=5,
+        max_overflow=0,
     )
 
 
