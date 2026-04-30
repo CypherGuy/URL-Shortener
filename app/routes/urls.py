@@ -41,6 +41,8 @@ def create_urls_router(
 
         cache.set(short_code, url.original_url)
         cache.set(f"clicks:{short_code}", url.clicks)
+        # Cache created_at so /stats can return early without hitting the DB.
+        cache.set(f"created_at:{short_code}", url.created_at.isoformat())
         background_tasks.add_task(increment_click, short_code)
         return RedirectResponse(cast(str, url.original_url), status_code=302)
 
@@ -55,9 +57,20 @@ def create_urls_router(
             cached_url = cache.get(short_code)
             if cached_url:
                 original_url = str(cached_url)
+
+            cached_created_at = cache.get(f"created_at:{short_code}")
         except RedisError:
             clicks = None
             original_url = None
+            cached_created_at = None
+
+        # Full cache hit: skip the DB entirely, same as the redirect endpoint does.
+        if original_url and clicks is not None and cached_created_at:
+            return StatsResponse(
+                clicks=clicks,
+                created_at=datetime.fromisoformat(str(cached_created_at)),
+                original_url=original_url,
+            )
 
         db_row = session.query(Code).filter_by(short_code_chars=short_code).one_or_none()
         if not db_row:
@@ -104,7 +117,8 @@ def create_urls_router(
                 model = Code(short_code_chars=short_code_chars, original_url=original_url)
                 session.add(model)
                 session.commit()
-                session.refresh(model)
+                # No session.refresh() needed: created_at is a Python-side default
+                # (lambda: datetime.now(utc)), so it's already on the object pre-INSERT.
 
                 return URLResponse(
                     short_url=f"{base_url}/{short_code_chars}",

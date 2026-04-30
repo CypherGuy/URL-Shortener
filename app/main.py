@@ -18,9 +18,12 @@ from app.sync_jobs import sync_to_db as sync_to_db_job
 #   web_engine handles only writes (shorten + delete) — smaller pool is fine
 #   sync_engine runs one connection every 30 s — pool_size=2 is plenty
 # Connection math per RDS instance (2 EC2 instances × pool caps below):
-#   Primary: (8+5)×2 + (2+0)×2 = 30 connections  (out of ~87 max)
-#   Replica: (15+5)×2             = 40 connections  (out of ~87 max)
-web_engine = make_engine(DATABASE_URL, pool_size=8, max_overflow=5)
+#   Primary: (10+5)×2 + (2+0)×2 = 34 connections  (out of ~87 max)
+#   Replica: (15+5)×2              = 40 connections  (out of ~87 max)
+# pool_size=10 because the /shorten retry loop holds the write connection for
+# up to 10 IntegrityError retries without releasing it mid-loop, so effective
+# hold time per request can be 5-10× longer than a simple INSERT.
+web_engine = make_engine(DATABASE_URL, pool_size=10, max_overflow=5)
 web_replica_engine = make_engine(READ_REPLICA_URL, pool_size=15, max_overflow=5)
 sync_engine = make_engine(DATABASE_URL, pool_size=2, max_overflow=0)
 
