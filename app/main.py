@@ -22,8 +22,8 @@ from app.sync_jobs import sync_to_db as sync_to_db_job
 #   Replica: (15+5)×2              = 40 connections  (out of ~87 max)
 # pool_size=12: at 40 write RPS/instance with ~170ms hold, burst demand peaks
 # at ~14 concurrent connections; 17 max (12+5) gives enough headroom.
-web_engine = make_engine(DATABASE_URL, pool_size=12, max_overflow=5)
-web_replica_engine = make_engine(READ_REPLICA_URL, pool_size=15, max_overflow=5)
+web_engine = make_engine(DATABASE_URL, pool_size=20, max_overflow=5)
+web_replica_engine = make_engine(READ_REPLICA_URL, pool_size=25, max_overflow=5)
 sync_engine = make_engine(DATABASE_URL, pool_size=2, max_overflow=0)
 
 redis_client = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, db=0, decode_responses=True)
