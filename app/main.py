@@ -13,15 +13,9 @@ from app.routes.urls import create_urls_router
 from app.sync_jobs import lifespan as sync_lifespan
 from app.sync_jobs import sync_to_db as sync_to_db_job
 
-# Asymmetric pool sizes because traffic is ~90% reads:
-#   web_replica_engine handles nearly all user-facing traffic (redirects + stats)
-#   web_engine handles only writes (shorten + delete) — smaller pool is fine
-#   sync_engine runs one connection every 30 s — pool_size=2 is plenty
-# Connection math per RDS instance (2 EC2 instances × pool caps below):
-#   Primary: (12+5)×2 + (2+0)×2 = 38 connections  (out of ~87 max)
-#   Replica: (15+5)×2              = 40 connections  (out of ~87 max)
-# pool_size=12: at 40 write RPS/instance with ~170ms hold, burst demand peaks
-# at ~14 concurrent connections; 17 max (12+5) gives enough headroom.
+# Incoming traffic is approximately 80% read 20% write.
+# web_replica_engine handles redirects + stats and web_engine handles writes only
+# sync_engine runs one connection every 30s
 web_engine = make_engine(DATABASE_URL, pool_size=25, max_overflow=5)
 web_replica_engine = make_engine(READ_REPLICA_URL, pool_size=25, max_overflow=5)
 sync_engine = make_engine(DATABASE_URL, pool_size=2, max_overflow=0)

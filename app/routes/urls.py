@@ -90,15 +90,18 @@ def create_urls_router(
     @router.delete("/{short_code}", status_code=204)
     def delete_code(short_code: str, session: Session = Depends(get_session)) -> None:
         cache = get_cache()
-        cached_url = cache.get(short_code)
-        if cached_url:
-            cache.delete(short_code)
+        cache.delete(short_code)
+        cache.delete(f"created_at:{short_code}")
+        cache.delete(f"clicks:{short_code}")
 
         url = session.query(Code).filter_by(short_code_chars=short_code).one_or_none()
+
+        # We don't use the cached url because if that's None, this key would stay in ElastiCache
+        if url:
+            cache.delete(url.original_url)
+
         if not url:
             raise HTTPException(status_code=404, detail="URL not found")
-
-        cache.delete(f"clicks:{short_code}")
 
         session.delete(url)
         session.commit()
@@ -109,6 +112,18 @@ def create_urls_router(
         if not original_url.startswith(("http://", "https://")):
             original_url = "https://" + original_url
 
+        # We want to see if the url is in the cache
+        cache = get_cache()
+        short_code = cache.get(original_url)
+        if short_code:
+            created_at = cache.get(f"created_at:{short_code}")
+            # Cache hit, return without needing to hit the db
+            return URLResponse(
+                short_url=f"{base_url}/{short_code}",
+                created_at=datetime.fromisoformat(str(created_at)),
+                original_url=original_url,
+            )
+
         for _ in range(10):
             try:
                 chars = string.ascii_letters + string.digits
@@ -117,8 +132,12 @@ def create_urls_router(
                 model = Code(short_code_chars=short_code_chars, original_url=original_url)
                 session.add(model)
                 session.commit()
-                # No session.refresh() needed: created_at is a Python-side default
-                # (lambda: datetime.now(utc)), so it's already on the object pre-INSERT.
+
+                # Add to cache
+                cache.set(short_code_chars, original_url)
+                cache.set(original_url, short_code_chars, ttl=86400)  # ttl only needed here since the
+                cache.set(f"clicks:{short_code_chars}", 0)
+                cache.set(f"created_at:{short_code_chars}", model.created_at.isoformat())
 
                 return URLResponse(
                     short_url=f"{base_url}/{short_code_chars}",

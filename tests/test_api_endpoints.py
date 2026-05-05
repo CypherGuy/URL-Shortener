@@ -14,6 +14,23 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 client = TestClient(app)
 
 
+@pytest.fixture
+def setup_db_with_cache():
+    """Like setup_db but yields the fake cache so tests can inspect cached keys."""
+    Base.metadata.create_all(bind=web_engine)
+    Base.metadata.create_all(bind=web_replica_engine)
+    fake_redis = fakeredis.FakeStrictRedis(decode_responses=True)
+    fake_cache = RedisCache(redis_client=fake_redis)
+    app.dependency_overrides[get_replica_session] = get_session
+    app.dependency_overrides[get_cache] = lambda: fake_cache
+    with patch.object(main_module, 'r', fake_cache):
+        yield fake_cache
+    app.dependency_overrides.pop(get_cache, None)
+    app.dependency_overrides.pop(get_replica_session, None)
+    Base.metadata.drop_all(bind=web_engine)
+    Base.metadata.drop_all(bind=web_replica_engine)
+
+
 @pytest.fixture(scope="function")
 def setup_db():
     """Setup and teardown database for each test"""
@@ -214,3 +231,78 @@ class TestPhase5LoadTesting:
         # Verify click count
         stats = client.get(f"/stats/{code}").json()
         assert stats["clicks"] == 100
+
+
+class TestShortenCaching:
+    """POST /shorten cache behaviour"""
+
+    def test_same_url_twice_returns_same_short_code(self, setup_db_with_cache):
+        """Second shorten of the same URL returns the cached short code, not a new one."""
+        url = "https://example.com/cache-dedup"
+        first = client.post("/shorten", json={"original_url": url}).json()
+        second = client.post("/shorten", json={"original_url": url}).json()
+        assert first["short_url"] == second["short_url"]
+
+    def test_same_url_twice_only_one_db_row(self, setup_db_with_cache):
+        """Second shorten of the same URL must not insert a second database row."""
+        from app.models import Code
+        url = "https://example.com/cache-dedup-db"
+        client.post("/shorten", json={"original_url": url})
+        client.post("/shorten", json={"original_url": url})
+        session = next(get_session())
+        count = session.query(Code).filter_by(original_url=url).count()
+        assert count == 1
+
+    def test_shorten_populates_forward_cache(self, setup_db_with_cache):
+        """After POST /shorten, short_code -> original_url is immediately in cache."""
+        cache = setup_db_with_cache
+        url = "https://example.com/forward-cache"
+        data = client.post("/shorten", json={"original_url": url}).json()
+        short_code = data["short_url"].split("/")[-1]
+        assert cache.get(short_code) == url
+
+    def test_shorten_populates_clicks_cache(self, setup_db_with_cache):
+        """After POST /shorten, clicks:{short_code} is cached at zero."""
+        cache = setup_db_with_cache
+        url = "https://example.com/clicks-cache"
+        data = client.post("/shorten", json={"original_url": url}).json()
+        short_code = data["short_url"].split("/")[-1]
+        assert cache.get_int(f"clicks:{short_code}") == 0
+
+    def test_shorten_populates_created_at_cache(self, setup_db_with_cache):
+        """After POST /shorten, created_at:{short_code} is cached."""
+        cache = setup_db_with_cache
+        url = "https://example.com/created-at-cache"
+        data = client.post("/shorten", json={"original_url": url}).json()
+        short_code = data["short_url"].split("/")[-1]
+        assert cache.get(f"created_at:{short_code}") is not None
+
+    def test_shorten_reverse_lookup_has_ttl(self, setup_db_with_cache):
+        """The url:{original_url} reverse-lookup key must have a TTL (not stored forever)."""
+        cache = setup_db_with_cache
+        url = "https://example.com/ttl-check"
+        client.post("/shorten", json={"original_url": url})
+        ttl = cache.redis_client.ttl(url)
+        assert ttl > 0, "reverse lookup key has no TTL — it will live forever"
+
+    def test_delete_clears_reverse_lookup(self, setup_db_with_cache):
+        """DELETE /{code} must remove the url:{original_url} reverse-lookup key."""
+        cache = setup_db_with_cache
+        url = "https://example.com/delete-reverse"
+        data = client.post("/shorten", json={"original_url": url}).json()
+        short_code = data["short_url"].split("/")[-1]
+        client.delete(f"/{short_code}")
+        assert cache.get(url) is None
+
+    def test_delete_clears_reverse_lookup_even_if_forward_cache_expired(self, setup_db_with_cache):
+        """Reverse lookup is cleared on DELETE even when the forward cache key has already expired."""
+        cache = setup_db_with_cache
+        url = "https://example.com/delete-expired-forward"
+        data = client.post("/shorten", json={"original_url": url}).json()
+        short_code = data["short_url"].split("/")[-1]
+
+        # Simulate the forward cache key expiring before DELETE is called.
+        cache.redis_client.delete(short_code)
+
+        client.delete(f"/{short_code}")
+        assert cache.get(url) is None
