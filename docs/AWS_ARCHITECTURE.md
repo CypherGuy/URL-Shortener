@@ -83,7 +83,9 @@ Pool sizes are asymmetric because traffic is ~80% reads and ~20% writes. Giving 
 
 ## Load Test Results
 
-Tested with [Locust](https://locust.io/) from a local machine against the ALB. Ramp rate: 2 users/second.
+Tested with [Locust](https://locust.io/) from a local machine against the ALB. Ramp rate: 2 users/second at 500 users, increasing at a constant ratio of 250 users to an extra user/second ramp up ie 1000 users would have a 4 user/second ramp up. Test duration was 8 minutes from start to finish.
+
+> **Note on locustfile evolution:** The 500 and 750 user tests were run with a fixed `original_url` (`https://example.com/test`), meaning `/shorten` requests were cache hits after the first warm-up and never hit the write pool. From the 1000 user test onwards, `original_url` uses a unique `uuid4()` per request, forcing every `/shorten` call through the full DB write path. The 1000 user results are therefore the more honest stress test of the write path.
 
 ### 500 Concurrent Users
 

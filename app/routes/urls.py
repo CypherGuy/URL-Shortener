@@ -117,12 +117,21 @@ def create_urls_router(
         short_code = cache.get(original_url)
         if short_code:
             created_at = cache.get(f"created_at:{short_code}")
-            # Cache hit, return without needing to hit the db
-            return URLResponse(
-                short_url=f"{base_url}/{short_code}",
-                created_at=datetime.fromisoformat(str(created_at)),
-                original_url=original_url,
-            )
+            if created_at:
+                return URLResponse(
+                    short_url=f"{base_url}/{short_code}",
+                    created_at=datetime.fromisoformat(str(created_at)),
+                    original_url=original_url,
+                )
+
+            existing = session.query(Code).filter_by(short_code_chars=short_code).one_or_none()
+            if existing:
+                cache.set(f"created_at:{short_code}", existing.created_at.isoformat())
+                return URLResponse(
+                    short_url=f"{base_url}/{short_code}",
+                    created_at=existing.created_at,
+                    original_url=original_url,
+                )
 
         for _ in range(10):
             try:

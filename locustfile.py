@@ -1,4 +1,7 @@
-from locust import HttpUser, task, between
+import random
+import uuid
+
+from locust import HttpUser, between, task
 
 
 class URLShortenerUser(HttpUser):
@@ -11,7 +14,7 @@ class URLShortenerUser(HttpUser):
     @task(2)
     def create_short_url(self):
         response = self.client.post("/shorten", json={
-            "original_url": "https://example.com/test"
+            "original_url": f"https://example.com/{uuid.uuid4()}"  # Unique URL to make it more realistic
         })
         if response.status_code == 201:
             data = response.json()
@@ -21,13 +24,11 @@ class URLShortenerUser(HttpUser):
     @task(7)
     def redirect(self):
         if self.created_codes:
-            import random
             code = random.choice(self.created_codes)
             self.client.get(f"/{code}", name="/[code]", allow_redirects=False)
 
     @task(1)
     def get_stats(self):
         if self.created_codes:
-            import random
             code = random.choice(self.created_codes)
             self.client.get(f"/stats/{code}", name="/stats/{code}")
