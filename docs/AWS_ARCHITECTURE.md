@@ -87,31 +87,35 @@ Tested with [Locust](https://locust.io/) from a local machine against the ALB. R
 
 > **Note on locustfile evolution:** The 500 and 750 user tests were run with a fixed `original_url` (`https://example.com/test`), meaning `/shorten` requests were cache hits after the first warm-up and never hit the write pool. From the 1000 user test onwards, `original_url` uses a unique `uuid4()` per request, forcing every `/shorten` call through the full DB write path. The 1000 user results are therefore the more honest stress test of the write path.
 
-### 500 Concurrent Users
+### 1000 Concurrent Users
+
+All failures were HTTP 502 Bad Gateway — transient ALB overload, not application errors.
 
 | Endpoint            | Requests    | Failures | Failure Rate | P50       | P95         |
 | ------------------- | ----------- | -------- | ------------ | --------- | ----------- |
-| `GET /{code}`       | 135,130     | 268      | **0.20%**    | 210ms     | 1,000ms     |
-| `POST /shorten`     | 39,042      | 296      | **0.76%**    | 280ms     | 1,400ms     |
-| `GET /stats/{code}` | 19,233      | 38       | **0.20%**    | 270ms     | 1,400ms     |
-| **Aggregated**      | **193,405** | **602**  | **0.31%**    | **230ms** | **1,300ms** |
+| `GET /{code}`       | 237,691     | 26       | **0.01%**    | 460ms     | 1,600ms     |
+| `POST /shorten`     | 68,657      | 10       | **0.01%**    | 640ms     | 2,300ms     |
+| `GET /stats/{code}` | 33,590      | 3        | **0.01%**    | 660ms     | 2,300ms     |
+| **Aggregated**      | **339,938** | **39**   | **0.01%**    | **500ms** | **1,900ms** |
 
-Peak throughput: **403 RPS**. Zero failures per second at steady state.
+Average throughput: **734 RPS**.
 
-### 750 Concurrent Users
+### 2000 Concurrent Users
 
-| Endpoint            | Requests    | Failures  | Failure Rate | P50       | P95          |
-| ------------------- | ----------- | --------- | ------------ | --------- | ------------ |
-| `GET /{code}`       | 77,859      | 614       | **0.79%**    | 170ms     | 16,000ms     |
-| `POST /shorten`     | 22,757      | 882       | **3.88%**    | 220ms     | 21,000ms     |
-| `GET /stats/{code}` | 11,182      | 98        | **0.88%**    | 210ms     | 22,000ms     |
-| **Aggregated**      | **111,798** | **1,594** | **1.43%**    | **190ms** | **16,000ms** |
+All failures were HTTP 502 Bad Gateway — transient ALB overload, not application errors.
 
-Peak throughput: **265 RPS**. Degradation is gradual — the system slows under pool pressure rather than failing hard.
+| Endpoint            | Requests    | Failures | Failure Rate | P50       | P95         |
+| ------------------- | ----------- | -------- | ------------ | --------- | ----------- |
+| `GET /{code}`       | 221,879     | 15       | **0.01%**    | 330ms     | 4,300ms     |
+| `POST /shorten`     | 64,970      | 11       | **0.02%**    | 420ms     | 6,400ms     |
+| `GET /stats/{code}` | 31,736      | 1        | **0.00%**    | 430ms     | 6,400ms     |
+| **Aggregated**      | **318,585** | **27**   | **0.01%**    | **360ms** | **5,800ms** |
+
+Average throughput: **715 RPS**. Failure rate stays near zero but P95 latency climbs sharply — the system absorbs load by slowing rather than shedding requests.
 
 ### Summary
 
-The system handles **500 concurrent users at a 0.31% failure rate** with sub-300ms median latency across all endpoints. Above 500 users, failure rates rise as connection pool demand approaches capacity, reaching 1.43% at 750 users. The primary bottleneck at the degradation point is read replica pool pressure — addressable by adding a third EC2 instance or upgrading the RDS replica to db.t4g.small.
+The system sustains **2000 concurrent users at a 0.008% failure rate** with zero application errors. All failures were transient 502 Bad Gateway responses. P95 latency rises to 5,800ms at 2000 users as the system approaches its RPS ceiling (~715 RPS), degrading gracefully by queuing rather than shedding requests. The P95 latency ceiling at 2000 users is addressable by horizontal scaling via adding a third EC2 instance or upgrading the RDS primary to db.t4g.small or better.
 
 ---
 
