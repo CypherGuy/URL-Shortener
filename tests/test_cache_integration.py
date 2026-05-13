@@ -206,10 +206,10 @@ class TestErrorHandling:
     """Test error handling and edge cases"""
 
     def test_set_with_zero_ttl(self, cache):
-        """Test setting a value with zero TTL (expires immediately in some cases)"""
+        """Test setting a value with zero TTL (expires immediately)."""
         cache.set("test_key", "test_value", ttl=0)
-        # Behavior depends on Redis - typically expires immediately or is not set
-        # This test ensures it doesn't crash
+        # Behavior depends on Redis - typically expires immediately or is
+        # not set. This test ensures it doesn't crash.
 
     def test_set_with_negative_ttl(self, cache):
         """Test setting a value with negative TTL"""

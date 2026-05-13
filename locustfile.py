@@ -13,9 +13,13 @@ class URLShortenerUser(HttpUser):
 
     @task(2)
     def create_short_url(self):
-        response = self.client.post("/shorten", json={
-            "original_url": f"https://example.com/{uuid.uuid4()}"  # Unique URL to make it more realistic
-        })
+        response = self.client.post(
+            "/shorten",
+            json={
+                # Unique URL to make it more realistic
+                "original_url": f"https://example.com/{uuid.uuid4()}"
+            },
+        )
         if response.status_code == 201:
             data = response.json()
             short_code = data["short_url"].split("/")[-1]

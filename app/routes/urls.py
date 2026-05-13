@@ -35,7 +35,11 @@ def create_urls_router(
             background_tasks.add_task(increment_click, short_code)
             return RedirectResponse(cached_url, status_code=302)
 
-        url = session.query(Code).filter_by(short_code_chars=short_code).one_or_none()
+        url = (
+            session.query(Code)
+            .filter_by(short_code_chars=short_code)
+            .one_or_none()
+        )
         if not url:
             raise HTTPException(status_code=404, detail="URL not found")
 
@@ -47,7 +51,10 @@ def create_urls_router(
         return RedirectResponse(cast(str, url.original_url), status_code=302)
 
     @router.get("/stats/{short_code}")
-    def get_stats(short_code: str, session: Session = Depends(get_replica_session)) -> StatsResponse:
+    def get_stats(
+        short_code: str,
+        session: Session = Depends(get_replica_session),
+    ) -> StatsResponse:
         cache = get_cache()
 
         try:
@@ -64,7 +71,7 @@ def create_urls_router(
             original_url = None
             cached_created_at = None
 
-        # Full cache hit: skip the DB entirely, same as the redirect endpoint does.
+        # Full cache hit: skip the DB entirely.
         if original_url and clicks is not None and cached_created_at:
             return StatsResponse(
                 clicks=clicks,
@@ -72,7 +79,11 @@ def create_urls_router(
                 original_url=original_url,
             )
 
-        db_row = session.query(Code).filter_by(short_code_chars=short_code).one_or_none()
+        db_row = (
+            session.query(Code)
+            .filter_by(short_code_chars=short_code)
+            .one_or_none()
+        )
         if not db_row:
             raise HTTPException(status_code=404, detail="URL not found")
 
@@ -88,15 +99,21 @@ def create_urls_router(
         )
 
     @router.delete("/{short_code}", status_code=204)
-    def delete_code(short_code: str, session: Session = Depends(get_session)) -> None:
+    def delete_code(
+        short_code: str, session: Session = Depends(get_session)
+    ) -> None:
         cache = get_cache()
         cache.delete(short_code)
         cache.delete(f"created_at:{short_code}")
         cache.delete(f"clicks:{short_code}")
 
-        url = session.query(Code).filter_by(short_code_chars=short_code).one_or_none()
+        url = (
+            session.query(Code)
+            .filter_by(short_code_chars=short_code)
+            .one_or_none()
+        )
 
-        # We don't use the cached url because if that's None, this key would stay in ElastiCache
+        # Don't use cached url: if None, the key would stay in ElastiCache
         if url:
             cache.delete(url.original_url)
 
@@ -107,7 +124,9 @@ def create_urls_router(
         session.commit()
 
     @router.post("/shorten", status_code=201)
-    def shorten(url_request: URLRequest, session: Session = Depends(get_session)) -> URLResponse:
+    def shorten(
+        url_request: URLRequest, session: Session = Depends(get_session)
+    ) -> URLResponse:
         original_url = url_request.original_url
         if not original_url.startswith(("http://", "https://")):
             original_url = "https://" + original_url
@@ -124,9 +143,16 @@ def create_urls_router(
                     original_url=original_url,
                 )
 
-            existing = session.query(Code).filter_by(short_code_chars=short_code).one_or_none()
+            existing = (
+                session.query(Code)
+                .filter_by(short_code_chars=short_code)
+                .one_or_none()
+            )
             if existing:
-                cache.set(f"created_at:{short_code}", existing.created_at.isoformat())
+                cache.set(
+                    f"created_at:{short_code}",
+                    existing.created_at.isoformat(),
+                )
                 return URLResponse(
                     short_url=f"{base_url}/{short_code}",
                     created_at=existing.created_at,
@@ -138,19 +164,27 @@ def create_urls_router(
                 chars = string.ascii_letters + string.digits
                 short_code_chars = "".join(random.choices(chars, k=10))
 
-                model = Code(short_code_chars=short_code_chars, original_url=original_url)
+                model = Code(
+                    short_code_chars=short_code_chars,
+                    original_url=original_url,
+                )
                 session.add(model)
                 session.commit()
 
                 # Add to cache
                 cache.set(short_code_chars, original_url)
-                cache.set(original_url, short_code_chars, ttl=86400)  # ttl only needed here since the
+                cache.set(original_url, short_code_chars, ttl=86400)
                 cache.set(f"clicks:{short_code_chars}", 0)
-                cache.set(f"created_at:{short_code_chars}", model.created_at.isoformat())
+                cache.set(
+                    f"created_at:{short_code_chars}",
+                    model.created_at.isoformat(),
+                )
 
                 return URLResponse(
                     short_url=f"{base_url}/{short_code_chars}",
-                    created_at=datetime.fromisoformat(model.created_at.isoformat()),
+                    created_at=datetime.fromisoformat(
+                        model.created_at.isoformat()
+                    ),
                     original_url=original_url,
                 )
             except IntegrityError:
@@ -159,7 +193,10 @@ def create_urls_router(
 
         raise HTTPException(
             status_code=500,
-            detail="Failed to generate unique short code after 10 attempts. Please try again.",
+            detail=(
+                "Failed to generate unique short code after 10 attempts. "
+                "Please try again."
+            ),
         )
 
     return router

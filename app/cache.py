@@ -24,6 +24,7 @@ class RedisCache:
         return self.redis_client.keys(pattern)
 
     def get_int(self, key):
-        """Returns get as an integer. We use another method to avoid type-hint confusion."""
+        """Returns get as an integer.
+        We use another method to avoid type-hint confusion."""
         value = self.redis_client.get(key)
         return int(value) if value is not None else 0

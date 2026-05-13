@@ -29,9 +29,15 @@ def sync_to_db(cache, sync_engine) -> None:
                 key.removeprefix("clicks:"): cache.get_int(key) for key in keys
             }
 
-            rows = session.execute(
-                select(Code).where(Code.short_code_chars.in_(list(click_map.keys())))
-            ).scalars().all()
+            rows = (
+                session.execute(
+                    select(Code).where(
+                        Code.short_code_chars.in_(list(click_map.keys()))
+                    )
+                )
+                .scalars()
+                .all()
+            )
 
             for row in rows:
                 row.clicks = click_map[row.short_code_chars]
@@ -49,6 +55,8 @@ def sync_to_db(cache, sync_engine) -> None:
 
 @asynccontextmanager
 async def lifespan(app, sync_to_db_func):
-    thread_primary = threading.Thread(target=every, args=(30, sync_to_db_func), daemon=True)
+    thread_primary = threading.Thread(
+        target=every, args=(30, sync_to_db_func), daemon=True
+    )
     thread_primary.start()
     yield

@@ -6,7 +6,8 @@ def make_engine(
     url: str,
     *,
     # Per-engine sizing: replica needs more connections than primary or sync.
-    # Defaults match the old hardcoded values so callers that omit these are unaffected.
+    # Defaults match the old hardcoded values so callers that omit these
+    # are unaffected.
     pool_size: int = 10,
     max_overflow: int = 0,
 ):
