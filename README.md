@@ -1,5 +1,7 @@
 # URL Shortener
 
+[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/CypherGuy/URL-Shortener)
+
 ![CI](https://github.com/CypherGuy/URL-Shortener/actions/workflows/run-ci.yml/badge.svg)
 
 A production-oriented URL shortener built as a multi-section course in System Design fundamentals. Each section deliberately introduces a new layer of architectural complexity, starting from a working monolith, then evolving toward a distributed system. This is Section 4.
