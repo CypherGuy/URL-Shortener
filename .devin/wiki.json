@@ -1,0 +1,203 @@
+{
+  "repo_notes": [
+    {
+      "content": ""
+    }
+  ],
+  "pages": [
+    {
+      "title": "Overview",
+      "purpose": "High-level introduction to the URL Shortener project: its purpose, architectural evolution (Section 1 through to and including Section 4), key design goals, and a map to all child pages.",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Getting Started",
+      "purpose": "Step-by-step guide for setting up the project locally: cloning the repo, configuring environment variables via .env, installing dependencies, and running the app with Docker Compose or directly with uvicorn.",
+      "parent": "Overview",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Architecture Overview",
+      "purpose": "Describes the three-tier architecture (FastAPI app + PostgreSQL + Redis), the dual-engine design, the cache-aside pattern, and the write-decoupling strategy. Links to deeper child pages for each subsystem.",
+      "parent": "Overview",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Core Application",
+      "purpose": "Overview of the application source code in app/, covering the API layer, data models, and the Redis cache abstraction. Links to child pages for each major component.",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "API Endpoints",
+      "purpose": "Detailed reference for every FastAPI endpoint: POST /shorten, GET /{short_code}, GET /stats/{short_code}, DELETE /{short_code}, and GET /health. Covers request/response schemas, status codes, URL normalization, and collision-retry logic.",
+      "parent": "Core Application",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Data Models",
+      "purpose": "Documents the SQLAlchemy ORM model (Code / codes table), Pydantic schemas (URLRequest, URLResponse, StatsResponse), and the deliberate separation between validation and persistence layers.",
+      "parent": "Core Application",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Redis Cache Layer",
+      "purpose": "Deep dive into the RedisCache class in app/cache.py: its methods (get, set, delete, exists, increment, get_int, keys), TTL semantics, the two key namespaces (short_code mappings vs. clicks: counters), and how it is wired into main.py.",
+      "parent": "Core Application",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Background Processing & Sync",
+      "purpose": "Explains the two async mechanisms: FastAPI BackgroundTasks for per-request click increments (increment_click), and the daemon thread running sync_to_db every 30 seconds via the every() helper. Covers the dual-engine isolation strategy (engine vs. sync_engine) and eventual-consistency guarantees.",
+      "parent": "Core Application",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Testing",
+      "purpose": "Overview of the test suite structure, tooling choices (pytest, fakeredis, TestClient), and the test categories. Links to child pages for API tests, cache integration tests, and read-replica isolation tests.",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "API Endpoint Tests",
+      "purpose": "Documents tests/test_api_endpoints.py: the five test phases (Repository Setup, Core Endpoints, Unit Tests, Deployment, Load Testing), the setup_db fixture, SQLite test database strategy, and key assertions for each endpoint.",
+      "parent": "Testing",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Cache Integration Tests",
+      "purpose": "Documents tests/test_cache_integration.py: use of fakeredis for isolation, test classes covering basic operations, TTL expiry, URL caching use cases, click counter scenarios, cache-aside pattern verification, error handling, and memory management.",
+      "parent": "Testing",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Read Replica Tests",
+      "purpose": "Documents tests/test_read_replica.py: the five test classes (ReplicaSetup, WritesGoToPrimary, ReadsGoToReplica, ReplicationLag, PrimaryReplicaIsolation), the sync_replica helper that simulates WAL replication, and the client_with_replica fixture that patches both engines. Covers eventual-consistency assertions and the 404-before-sync behaviour.",
+      "parent": "Testing",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Infrastructure & Deployment",
+      "purpose": "Overview of how the service is containerized and deployed, both locally via Docker Compose and on AWS. Links to child pages for Docker setup, CI/CD pipeline, and AWS architecture.",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Docker & Docker Compose",
+      "purpose": "Covers the Dockerfile (python:3.11-slim base, uvicorn entrypoint), docker-compose.yml service definitions (app, db, redis), environment variables, named volumes (postgres_data, redis-data), health checks, and the depends_on startup sequencing.",
+      "parent": "Infrastructure & Deployment",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "CI/CD Pipeline",
+      "purpose": "Documents the GitHub Actions workflow (run-urlshortener): the four sequential jobs (flake8-lint → check_requirements → test → docker), service sidecar containers for PostgreSQL and Redis, pip-tools dependency validation, and the Docker health-check retry loop.",
+      "parent": "Infrastructure & Deployment",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "AWS Architecture",
+      "purpose": "Documents the production AWS deployment described in docs/AWS_ARCHITECTURE.md: EC2 application layer (t3.small × 2), RDS PostgreSQL primary + read replica (db.t4g.micro), ElastiCache Valkey, Application Load Balancer, connection pool math across instances, and the request flow for each endpoint type.",
+      "parent": "Infrastructure & Deployment",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Load Testing & Performance Results",
+      "purpose": "Overview of the Locust-based load testing setup and the visual performance artifacts across all four sections of architectural evolution. Links to child pages for the Locust configuration and the benchmark results.",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Locust Load Test Configuration",
+      "purpose": "Documents locustfile.py: the URLShortenerUser class, task weights (create_short_url:2, redirect:7, get_stats:1), wait_time settings, the uuid4-per-request strategy for honest write-path testing, and how to run Locust against the service.",
+      "parent": "Load Testing & Performance Results",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Performance Benchmarks & Visual Results",
+      "purpose": "Presents the load test results across all sections: Section 1 (synchronous monolith, 108 RPS), Section 2 (Redis + BackgroundTasks, 327.8 RPS), Section 3 (read replica added), and Section 4 (AWS deployment, 715–734 RPS at 1000–2000 concurrent users). Covers the throughput improvements, latency comparisons, failure rates, and the stored PNG artifacts (tables and graphs) for each section.",
+      "parent": "Load Testing & Performance Results",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    },
+    {
+      "title": "Glossary",
+      "purpose": "Definitions of all codebase-specific terms, abbreviations, and domain concepts an onboarding engineer needs to know, each with code pointers. Covers terms from all four architectural sections including AWS-specific terminology added in Section 4.",
+      "page_notes": [
+        {
+          "content": ""
+        }
+      ]
+    }
+  ]
+}
